@@ -7,7 +7,7 @@ import (
 )
 
 func TestNewSMTPEmailSender(t *testing.T) {
-	sender := NewSMTPEmailSender("smtp.example.com", "587", "username", "password", "noreply@example.com")
+	sender := NewSMTPEmailSender("smtp.example.com", "587", "username", "password", "noreply@example.com", true)
 
 	assert.NotNil(t, sender)
 	assert.Equal(t, "smtp.example.com", sender.smtpHost)
@@ -15,4 +15,5 @@ func TestNewSMTPEmailSender(t *testing.T) {
 	assert.Equal(t, "username", sender.smtpUsername)
 	assert.Equal(t, "password", sender.smtpPassword)
 	assert.Equal(t, "noreply@example.com", sender.senderEmail)
+	assert.True(t, sender.allowUnencrypted)
 }
