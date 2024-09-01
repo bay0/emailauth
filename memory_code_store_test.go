@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMemoryCodeStore(t *testing.T) {
@@ -13,67 +15,45 @@ func TestMemoryCodeStore(t *testing.T) {
 	email := "test@example.com"
 	code := &AuthCode{
 		Code:      "123456",
-		ExpiresAt: time.Now().Add(time.Minute), // shorter expiration for testing
+		ExpiresAt: time.Now().Add(100 * time.Millisecond), // shorter expiration for testing
 	}
 
 	// Test Set
 	t.Run("Set Code", func(t *testing.T) {
 		err := store.Set(ctx, email, code)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		assert.NoError(t, err)
 	})
 
 	// Test Get
 	t.Run("Get Code", func(t *testing.T) {
 		retrievedCode, err := store.Get(ctx, email)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if retrievedCode == nil {
-			t.Fatalf("expected code, got nil")
-		}
-		if retrievedCode.Code != code.Code {
-			t.Errorf("expected code %s, got %s", code.Code, retrievedCode.Code)
-		}
-		if !retrievedCode.ExpiresAt.Equal(code.ExpiresAt) {
-			t.Errorf("expected expiration date %v, got %v", code.ExpiresAt, retrievedCode.ExpiresAt)
-		}
+		assert.NoError(t, err)
+		assert.NotNil(t, retrievedCode)
+		assert.Equal(t, code.Code, retrievedCode.Code)
+		assert.WithinDuration(t, code.ExpiresAt, retrievedCode.ExpiresAt, time.Millisecond)
 	})
 
 	// Test Expiration
 	t.Run("Code Expiration", func(t *testing.T) {
 		// Wait for the code to expire
-		time.Sleep(time.Minute + time.Second)
+		time.Sleep(150 * time.Millisecond)
 
 		retrievedCode, err := store.Get(ctx, email)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if retrievedCode != nil {
-			t.Fatalf("expected code to be expired and deleted, but it still exists")
-		}
+		assert.NoError(t, err)
+		assert.Nil(t, retrievedCode)
 	})
 
 	// Test Delete
 	t.Run("Delete Code", func(t *testing.T) {
 		// Reset the code
 		err := store.Set(ctx, email, code)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		assert.NoError(t, err)
 
 		err = store.Delete(ctx, email)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		assert.NoError(t, err)
 
 		retrievedCode, err := store.Get(ctx, email)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if retrievedCode != nil {
-			t.Errorf("expected code to be deleted, but it still exists")
-		}
+		assert.NoError(t, err)
+		assert.Nil(t, retrievedCode)
 	})
 }
