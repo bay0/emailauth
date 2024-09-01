@@ -53,7 +53,10 @@ func (s *InMemoryCodeStore) Delete(ctx context.Context, email string) error {
 
 // expireCode deletes the code from memory after its expiration time.
 func (s *InMemoryCodeStore) expireCode(email string, expiresAt time.Time) {
-	time.Sleep(time.Until(expiresAt))
+	timer := time.NewTimer(time.Until(expiresAt))
+	defer timer.Stop()
+
+	<-timer.C
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
