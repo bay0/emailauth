@@ -1,0 +1,10 @@
+{{define "content"}}
+<p>A verification code has been sent to {{.Email}}</p>
+<form action="/verify" method="post">
+    <div class="form-group">
+        <label for="code">Verification Code:</label>
+        <input type="text" id="code" name="code" required>
+    </div>
+    <button type="submit">Verify</button>
+</form>
+{{end}}

@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"github.com/bay0/emailauth"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/sessions"
 	"github.com/joho/godotenv"
 )
 
@@ -25,6 +25,7 @@ type Config struct {
 	SMTPPassword     string
 	SenderEmail      string
 	AllowUnencrypted bool
+	SessionKey       string
 }
 
 type RedisClientWrapper struct {
@@ -46,66 +47,169 @@ func (r *RedisClientWrapper) Del(ctx context.Context, keys ...string) error {
 type Server struct {
 	authService *emailauth.AuthService
 	router      *mux.Router
+	store       *sessions.CookieStore
+	templates   *template.Template
 }
 
-func NewServer(authService *emailauth.AuthService) *Server {
+func NewServer(authService *emailauth.AuthService, sessionKey string) *Server {
 	s := &Server{
 		authService: authService,
 		router:      mux.NewRouter(),
+		store:       sessions.NewCookieStore([]byte(sessionKey)),
+		templates:   template.Must(template.ParseGlob("templates/*.html")),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
-	s.router.HandleFunc("/send-code", s.handleSendCode).Methods("POST")
-	s.router.HandleFunc("/verify-code", s.handleVerifyCode).Methods("POST")
+	s.router.HandleFunc("/", s.handleHome).Methods("GET")
+	s.router.HandleFunc("/login", s.handleLoginForm).Methods("GET")
+	s.router.HandleFunc("/login", s.handleLoginSubmit).Methods("POST")
+	s.router.HandleFunc("/verify", s.handleVerifyForm).Methods("GET")
+	s.router.HandleFunc("/verify", s.handleVerifySubmit).Methods("POST")
+	s.router.HandleFunc("/logout", s.handleLogout).Methods("GET")
+
+	s.router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 }
 
-func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
+func (s *Server) renderTemplate(w http.ResponseWriter, tmpl string, data map[string]interface{}) {
+	log.Printf("Rendering template: %s", tmpl)
+	if data == nil {
+		data = make(map[string]interface{})
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	data["Title"] = "Email Authentication"
+
+	t, err := template.Must(s.templates.Clone()).ParseFiles("templates/layout.html", "templates/"+tmpl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = t.ExecuteTemplate(w, "layout.html", data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
+	session, _ := s.store.Get(r, "session")
+	email, ok := session.Values["email"].(string)
+	authenticated, _ := session.Values["authenticated"].(bool)
+	if !ok || !authenticated {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	s.renderTemplate(w, "home.html", map[string]interface{}{
+		"Email": email,
+	})
+}
+func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
+	session, _ := s.store.Get(r, "session")
+	flash, _ := session.Values["flash"].(string)
+	delete(session.Values, "flash")
+	session.Save(r, w)
+	s.renderTemplate(w, "login.html", map[string]interface{}{
+		"Flash": flash,
+	})
+}
+
+func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
+	email := r.FormValue("email")
+	if email == "" {
+		s.renderTemplate(w, "login.html", map[string]interface{}{
+			"Flash":     "Email is required",
+			"FlashType": "error",
+		})
 		return
 	}
 
 	ctx := r.Context()
-	if err := s.authService.SendAuthCode(ctx, req.Email); err != nil {
+	if err := s.authService.SendAuthCode(ctx, email); err != nil {
 		log.Printf("Error sending auth code: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to send auth code: %v", err), http.StatusInternalServerError)
+		s.renderTemplate(w, "login.html", map[string]interface{}{
+			"Flash":     "Failed to send auth code",
+			"FlashType": "error",
+		})
 		return
 	}
 
-	respondJSON(w, map[string]string{"message": "Auth code sent successfully"}, http.StatusOK)
+	session, _ := s.store.Get(r, "session")
+	session.Values["email"] = email
+	session.Save(r, w)
+
+	http.Redirect(w, r, "/verify", http.StatusSeeOther)
 }
 
-func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
-		Code  string `json:"code"`
+func (s *Server) handleVerifyForm(w http.ResponseWriter, r *http.Request) {
+	session, _ := s.store.Get(r, "session")
+	email, ok := session.Values["email"].(string)
+	if !ok || email == "" {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	flash, _ := session.Values["flash"].(string)
+	delete(session.Values, "flash")
+	session.Save(r, w)
+	s.renderTemplate(w, "verify.html", map[string]interface{}{
+		"Email": email,
+		"Flash": flash,
+	})
+}
+
+func (s *Server) handleVerifySubmit(w http.ResponseWriter, r *http.Request) {
+	session, _ := s.store.Get(r, "session")
+	email, ok := session.Values["email"].(string)
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	code := r.FormValue("code")
+	if code == "" {
+		s.renderTemplate(w, "verify.html", map[string]interface{}{
+			"Email":     email,
+			"Flash":     "Code is required",
+			"FlashType": "error",
+		})
 		return
 	}
 
 	ctx := r.Context()
-	isValid, err := s.authService.VerifyCode(ctx, req.Email, req.Code)
+	isValid, err := s.authService.VerifyCode(ctx, email, code)
 	if err != nil {
 		log.Printf("Error verifying code: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to verify code: %v", err), http.StatusInternalServerError)
+		s.renderTemplate(w, "verify.html", map[string]interface{}{
+			"Email":     email,
+			"Flash":     "Failed to verify code",
+			"FlashType": "error",
+		})
 		return
 	}
 
-	respondJSON(w, map[string]bool{"valid": isValid}, http.StatusOK)
+	if !isValid {
+		s.renderTemplate(w, "verify.html", map[string]interface{}{
+			"Email":     email,
+			"Flash":     "Invalid code",
+			"FlashType": "error",
+		})
+		return
+	}
+
+	session.Values["authenticated"] = true
+	session.Values["flash"] = "Successfully logged in!"
+	session.Save(r, w)
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func respondJSON(w http.ResponseWriter, data interface{}, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	session, _ := s.store.Get(r, "session")
+	session.Values["authenticated"] = false
+	delete(session.Values, "email")
+	session.Values["flash"] = "You have been logged out."
+	session.Save(r, w)
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func loadConfig() (*Config, error) {
@@ -124,6 +228,7 @@ func loadConfig() (*Config, error) {
 		SMTPPassword:     os.Getenv("SMTP_PASSWORD"),
 		SenderEmail:      os.Getenv("SENDER_EMAIL"),
 		AllowUnencrypted: allowUnencrypted,
+		SessionKey:       getEnv("SESSION_KEY", "your-secret-key"),
 	}, nil
 }
 
@@ -158,7 +263,7 @@ func main() {
 
 	authService := emailauth.NewAuthService(emailSender, codeStore)
 
-	server := NewServer(authService)
+	server := NewServer(authService, config.SessionKey)
 
 	log.Printf("Server starting on :%s", config.ServerPort)
 	log.Fatal(http.ListenAndServe(":"+config.ServerPort, server.router))
